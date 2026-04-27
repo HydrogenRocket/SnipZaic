@@ -266,12 +266,15 @@ class WorkplaneCanvas(QWidget):
         self.update()
         self.zoom_changed.emit(self.zoom)
 
-    def add_snip(self, pixmap: QPixmap, outline_path=None):
+    def add_snip(self, pixmap: QPixmap, outline_path=None,
+                 x_mm: float | None = None, y_mm: float | None = None):
         mm_per_px = 25.4 / SCREEN_DPI
         snip_w_mm = pixmap.width() * mm_per_px
         snip_h_mm = pixmap.height() * mm_per_px
-        x_mm = max(0.0, (self.project.page_width_mm - snip_w_mm) / 2)
-        y_mm = max(0.0, (self.project.page_height_mm - snip_h_mm) / 2)
+        if x_mm is None:
+            x_mm = max(0.0, (self.project.page_width_mm - snip_w_mm) / 2)
+        if y_mm is None:
+            y_mm = max(0.0, (self.project.page_height_mm - snip_h_mm) / 2)
         snip = Snip(pixmap=pixmap, x_mm=x_mm, y_mm=y_mm, outline_path=outline_path)
         self.project.snips.append(snip)
         self._selected_snip = snip
@@ -522,6 +525,25 @@ class WorkplaneCanvas(QWidget):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             factor = 1.12 if event.angleDelta().y() > 0 else 1 / 1.12
             self._zoom_around(event.position(), factor)
+        elif self._drag_snip is not None:
+            factor = 1.06 if event.angleDelta().y() > 0 else 1 / 1.06
+            snip = self._drag_snip
+            mm_per_px = 25.4 / SCREEN_DPI
+            # Keep snip center fixed while scaling
+            w_mm = snip.pixmap.width() * mm_per_px * snip.scale_x
+            h_mm = snip.pixmap.height() * mm_per_px * snip.scale_y
+            cx = snip.x_mm + w_mm / 2
+            cy = snip.y_mm + h_mm / 2
+            snip.scale_x = max(0.05, snip.scale_x * factor)
+            snip.scale_y = max(0.05, snip.scale_y * factor)
+            new_w_mm = snip.pixmap.width() * mm_per_px * snip.scale_x
+            new_h_mm = snip.pixmap.height() * mm_per_px * snip.scale_y
+            snip.x_mm = cx - new_w_mm / 2
+            snip.y_mm = cy - new_h_mm / 2
+            # Recalculate drag offset so cursor stays consistent after resize
+            pos_mm = self._widget_to_page_mm(event.position())
+            self._drag_offset_mm = QPointF(pos_mm.x() - snip.x_mm, pos_mm.y() - snip.y_mm)
+            self.update()
         else:
             super().wheelEvent(event)
 
@@ -555,8 +577,9 @@ class WorkplanePanel(QWidget):
     def set_page_tool(self, tool: str):
         self.canvas.active_tool = tool
 
-    def add_snip(self, pixmap: QPixmap, outline_path=None):
-        self.canvas.add_snip(pixmap, outline_path)
+    def add_snip(self, pixmap: QPixmap, outline_path=None,
+                 x_mm: float | None = None, y_mm: float | None = None):
+        self.canvas.add_snip(pixmap, outline_path, x_mm=x_mm, y_mm=y_mm)
 
     def _fit(self):
         self.canvas.fit_to_window()

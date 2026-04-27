@@ -4,7 +4,7 @@ from PyQt6.QtWebEngineCore import (
     QWebEngineProfile, QWebEnginePage,
     QWebEngineScript, QWebEngineSettings,
 )
-from PyQt6.QtCore import QUrl, QRect, Qt, pyqtSignal
+from PyQt6.QtCore import QUrl, QRect, QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap, QPainter, QPainterPath, QTransform
 
 from ui.snip_overlay import SnipOverlay
@@ -94,8 +94,8 @@ def _make_profile() -> QWebEngineProfile:
 
 
 class BrowserPanel(QWidget):
-    # Second arg is the normalized outline QPainterPath (poly/free snips) or None (rect snips)
-    snip_ready = pyqtSignal(QPixmap, object)
+    # pixmap, outline_path (QPainterPath|None), cut_center in central-widget coords
+    snip_ready = pyqtSignal(QPixmap, object, QPointF)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -201,9 +201,11 @@ class BrowserPanel(QWidget):
             )
             cropped = self._snapshot.copy(scaled)
             cropped.setDevicePixelRatio(1.0)
-            self.snip_ready.emit(cropped, None)
-        if self._active_tool in self._SNIP_TOOLS:
-            self._overlay.reset()
+            cut_center = self._cut_center_in_central(QPointF(rect.center()))
+            self.snip_ready.emit(cropped, None, cut_center)
+        # Exit freeze-frame so the drag overlay can take over
+        self._overlay.hide()
+        self.browser.show()
 
     def _on_path_selected(self, path: QPainterPath):
         ow, oh = self._overlay.width(), self._overlay.height()
@@ -229,9 +231,21 @@ class BrowserPanel(QWidget):
                 # Normalize the outline path to 0..1 of the snip rect
                 nt = QTransform().scale(1.0 / br.width(), 1.0 / br.height())
                 outline = nt.map(local_path)
-                self.snip_ready.emit(result, outline)
-        if self._active_tool in self._SNIP_TOOLS:
-            self._overlay.reset()
+                cut_center = self._cut_center_in_central(path.boundingRect().center())
+                self.snip_ready.emit(result, outline, cut_center)
+        # Exit freeze-frame so the drag overlay can take over
+        self._overlay.hide()
+        self.browser.show()
+
+    def _cut_center_in_central(self, overlay_pos: QPointF) -> QPointF:
+        """Convert a point in overlay-local coords to central-widget coords."""
+        central = self.window().centralWidget()
+        return QPointF(self._overlay.mapTo(central, overlay_pos.toPoint()))
 
     def _on_cancelled(self):
         self.browser.show()
+
+    def rearm(self):
+        """Re-freeze the browser for another snip (called after a drag is placed)."""
+        if self._active_tool in self._SNIP_TOOLS:
+            self._arm()

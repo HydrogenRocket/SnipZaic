@@ -1,13 +1,18 @@
 from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QMessageBox
-from PyQt6.QtGui import QAction, QKeySequence, QPixmap
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QAction, QKeySequence, QPixmap, QCursor
+from PyQt6.QtCore import Qt, QPointF
 
 from core.project import Project
+from core.snip import Snip
 from ui.browser_panel import BrowserPanel
 from ui.workplane_panel import WorkplanePanel
 from ui.browser_tool_strip import BrowserToolStrip
 from ui.page_tool_strip import PageToolStrip
 from ui.new_project_dialog import NewProjectDialog
+from ui.snip_drag_overlay import SnipDragOverlay
+
+MM_TO_INCH = 1 / 25.4
+SCREEN_DPI = 96
 
 
 class MainWindow(QMainWindow):
@@ -34,6 +39,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self.workplane_panel, stretch=1)
         row.addWidget(self.page_tool_strip)
         self.setCentralWidget(central)
+
+        # --- drag overlay (parented to central widget, spans everything) ---
+        self._drag_overlay = SnipDragOverlay(central)
+        self._drag_overlay.dropped.connect(self._on_drag_dropped)
+        self._drag_overlay.cancelled.connect(self._on_drag_cancelled)
 
         # --- menu ---
         self._build_menu()
@@ -90,10 +100,40 @@ class MainWindow(QMainWindow):
         about_act.triggered.connect(self._show_about)
         help_menu.addAction(about_act)
 
-    # --- slots ---
+    # --- snip drag flow ---
 
-    def _on_snip_ready(self, pixmap: QPixmap, outline_path):
-        self.workplane_panel.add_snip(pixmap, outline_path)
+    def _on_snip_ready(self, pixmap: QPixmap, outline_path, cut_center: QPointF):
+        # cut_center is already in central-widget coordinates (computed by BrowserPanel)
+        self._drag_overlay.start_drag(pixmap, outline_path, cut_center)
+
+    def _on_drag_dropped(self, pixmap: QPixmap, outline_path, pos: QPointF):
+        """pos is in central-widget coordinates."""
+        canvas = self.workplane_panel.canvas
+        canvas_local = QPointF(canvas.mapFrom(self.centralWidget(), pos.toPoint()))
+
+        on_canvas = (
+            0 <= canvas_local.x() <= canvas.width()
+            and 0 <= canvas_local.y() <= canvas.height()
+        )
+        if not on_canvas:
+            # Dropped outside the workplane — put it back so the user can try again
+            self._drag_overlay.resume(pixmap, outline_path, pos)
+            return
+
+        # Convert drop point to page-mm, centred on the cursor
+        pos_mm = canvas._widget_to_page_mm(canvas_local)
+        mm_per_px = 25.4 / SCREEN_DPI
+        x_mm = pos_mm.x() - (pixmap.width() * mm_per_px) / 2
+        y_mm = pos_mm.y() - (pixmap.height() * mm_per_px) / 2
+
+        canvas.add_snip(pixmap, outline_path, x_mm=x_mm, y_mm=y_mm)
+        self.browser_panel.rearm()
+
+    def _on_drag_cancelled(self):
+        # Snip is discarded; leave the browser showing for normal browsing
+        pass
+
+    # --- other slots ---
 
     def _new_project(self):
         dialog = NewProjectDialog(self)
