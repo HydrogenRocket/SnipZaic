@@ -94,7 +94,8 @@ def _make_profile() -> QWebEngineProfile:
 
 
 class BrowserPanel(QWidget):
-    snip_ready = pyqtSignal(QPixmap)
+    # Second arg is the normalized outline QPainterPath (poly/free snips) or None (rect snips)
+    snip_ready = pyqtSignal(QPixmap, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -200,7 +201,7 @@ class BrowserPanel(QWidget):
             )
             cropped = self._snapshot.copy(scaled)
             cropped.setDevicePixelRatio(1.0)
-            self.snip_ready.emit(cropped)
+            self.snip_ready.emit(cropped, None)
         if self._active_tool in self._SNIP_TOOLS:
             self._overlay.reset()
 
@@ -220,11 +221,15 @@ class BrowserPanel(QWidget):
                 result.fill(Qt.GlobalColor.transparent)
                 p = QPainter(result)
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                p.setClipPath(scaled_path.translated(-br.x(), -br.y()))
+                local_path = scaled_path.translated(-br.x(), -br.y())
+                p.setClipPath(local_path)
                 p.drawPixmap(0, 0, self._snapshot, br.x(), br.y(), br.width(), br.height())
                 p.end()
                 result.setDevicePixelRatio(1.0)
-                self.snip_ready.emit(result)
+                # Normalize the outline path to 0..1 of the snip rect
+                nt = QTransform().scale(1.0 / br.width(), 1.0 / br.height())
+                outline = nt.map(local_path)
+                self.snip_ready.emit(result, outline)
         if self._active_tool in self._SNIP_TOOLS:
             self._overlay.reset()
 

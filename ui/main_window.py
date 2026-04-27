@@ -92,8 +92,8 @@ class MainWindow(QMainWindow):
 
     # --- slots ---
 
-    def _on_snip_ready(self, pixmap: QPixmap):
-        self.workplane_panel.add_snip(pixmap)
+    def _on_snip_ready(self, pixmap: QPixmap, outline_path):
+        self.workplane_panel.add_snip(pixmap, outline_path)
 
     def _new_project(self):
         dialog = NewProjectDialog(self)

@@ -18,7 +18,7 @@ class PageToolStrip(QWidget):
     _TOOLS = [
         ("A", "auto",   "Auto — smart cursor: move or trim depending on context"),
         ("M", "move",   "Move Snip — drag to reposition"),
-        ("T", "trim",   "Trim Snip — straight cut across a snip  [Phase 5]"),
+        ("T", "trim",   "Trim Snip — snap to edge, drag to opposite edge, removes smaller piece"),
         ("L", "layers", "Layer order — drag snip up/down the stack  [Phase 4]"),
     ]
 
@@ -37,7 +37,7 @@ class PageToolStrip(QWidget):
 
         for label, tool_id, tip in self._TOOLS:
             btn = _ToolBtn(label, tip)
-            if tool_id in ("trim", "layers"):
+            if tool_id in ("layers",):
                 btn.setEnabled(False)
             self._group.addButton(btn)
             self._buttons.append(btn)
