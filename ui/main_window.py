@@ -78,6 +78,18 @@ class MainWindow(QMainWindow):
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
 
+        edit_menu = menu.addMenu("&Edit")
+
+        undo_act = QAction("&Undo", self)
+        undo_act.setShortcut(QKeySequence.StandardKey.Undo)
+        undo_act.triggered.connect(self.workplane_panel.undo)
+        edit_menu.addAction(undo_act)
+
+        redo_act = QAction("&Redo", self)
+        redo_act.setShortcut(QKeySequence("Ctrl+Y"))
+        redo_act.triggered.connect(self.workplane_panel.redo)
+        edit_menu.addAction(redo_act)
+
         view_menu = menu.addMenu("&View")
 
         fit_act = QAction("Fit Page to Window", self)

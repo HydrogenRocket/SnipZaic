@@ -1,3 +1,5 @@
+import math
+
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter, QPixmap, QColor, QTransform
@@ -19,9 +21,9 @@ class SnipDragOverlay(QWidget):
     dropped = pyqtSignal(QPixmap, object, QPointF)
     cancelled = pyqtSignal()
 
-    _STEPS = 8
-    _INTERVAL_MS = 18       # 8 × 18 ms ≈ 144 ms total rise animation
-    _SCALE_START = 0.82
+    _STEPS = 10
+    _INTERVAL_MS = 16       # 10 × 16 ms ≈ 160 ms
+    _SCALE_START = 0.92
     _HOVER_SCALE = 1.02     # subtle enlarge when cursor is over the snip
 
     def __init__(self, parent: QWidget):
@@ -89,7 +91,9 @@ class SnipDragOverlay(QWidget):
     def _tick(self):
         self._step += 1
         t = self._step / self._STEPS
-        self._scale = self._SCALE_START + (1.0 - self._SCALE_START) * t
+        # Quarter-sine ease-out: fast start, decelerates smoothly into 1.0
+        ease = math.sin(math.pi / 2 * t)
+        self._scale = self._SCALE_START + (1.0 - self._SCALE_START) * ease
         self.update()
         if self._step >= self._STEPS:
             self._timer.stop()

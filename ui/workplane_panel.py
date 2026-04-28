@@ -1,5 +1,7 @@
+import math
+
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QPixmap, QCursor,
     QPainterPath, QTransform, QBrush,
@@ -11,6 +13,25 @@ from core.snip import Snip
 MM_TO_INCH = 1 / 25.4
 SCREEN_DPI = 96
 _SNAP_DIST = 12  # px
+_UNDO_LIMIT = 50
+_LIFT = 0.025        # visual enlargement factor for organizing (non-stuck) snips
+_SHADOW_OFF = 4      # shadow offset in px
+_SHADOW_ALPHA = 38   # shadow opacity
+
+
+def _copy_snip(s: Snip) -> Snip:
+    idt = QTransform()
+    return Snip(
+        pixmap=s.pixmap,
+        x_mm=s.x_mm, y_mm=s.y_mm,
+        rotation=s.rotation,
+        scale_x=s.scale_x, scale_y=s.scale_y,
+        flipped_h=s.flipped_h, flipped_v=s.flipped_v,
+        blend_mode=s.blend_mode,
+        locked=s.locked, stuck=s.stuck,
+        clip_path=idt.map(s.clip_path) if s.clip_path else None,
+        outline_path=idt.map(s.outline_path) if s.outline_path else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +134,14 @@ class WorkplaneCanvas(QWidget):
         self._drag_snip: Snip | None = None
         self._drag_offset_mm = QPointF(0, 0)
 
+        # Drop animation state
+        self._anim_snip: Snip | None = None
+        self._anim_step = 0
+        self._anim_cx = 0.0
+        self._anim_cy = 0.0
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._anim_tick)
+
         # Trim tool state
         self._trim_hover: tuple[Snip, QPointF, int, list] | None = None
         self._trim_snip: Snip | None = None
@@ -122,6 +151,10 @@ class WorkplaneCanvas(QWidget):
         self._trim_end_seg: int = -1
         self._trim_verts: list[QPointF] = []   # outline verts in screen coords
         self._trim_mouse: QPointF | None = None
+
+        # Undo / redo
+        self._undo_stack: list[list] = []
+        self._redo_stack: list[list] = []
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -156,7 +189,7 @@ class WorkplaneCanvas(QWidget):
 
     def _snip_at(self, pos: QPointF) -> Snip | None:
         for snip in reversed(self.project.snips):
-            if snip.locked:
+            if snip.locked or snip.stuck:
                 continue
             if self._snip_rect(snip).contains(pos):
                 return snip
@@ -249,6 +282,36 @@ class WorkplaneCanvas(QWidget):
         )
         self.update()
 
+    # --- undo / redo ---
+
+    def _push_undo(self):
+        self._undo_stack.append([_copy_snip(s) for s in self.project.snips])
+        if len(self._undo_stack) > _UNDO_LIMIT:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def _undo(self):
+        if not self._undo_stack:
+            return
+        self._redo_stack.append([_copy_snip(s) for s in self.project.snips])
+        self.project.snips = self._undo_stack.pop()
+        self._selected_snip = None
+        self._drag_snip = None
+        self._anim_timer.stop()
+        self._anim_snip = None
+        self.update()
+
+    def _redo(self):
+        if not self._redo_stack:
+            return
+        self._undo_stack.append([_copy_snip(s) for s in self.project.snips])
+        self.project.snips = self._redo_stack.pop()
+        self._selected_snip = None
+        self._drag_snip = None
+        self._anim_timer.stop()
+        self._anim_snip = None
+        self.update()
+
     # --- public API ---
 
     def fit_to_window(self):
@@ -266,6 +329,10 @@ class WorkplaneCanvas(QWidget):
         self.update()
         self.zoom_changed.emit(self.zoom)
 
+    _ANIM_STEPS = 10
+    _ANIM_INTERVAL_MS = 16
+    _ANIM_SCALE_START = 0.92
+
     def add_snip(self, pixmap: QPixmap, outline_path=None,
                  x_mm: float | None = None, y_mm: float | None = None):
         mm_per_px = 25.4 / SCREEN_DPI
@@ -275,10 +342,53 @@ class WorkplaneCanvas(QWidget):
             x_mm = max(0.0, (self.project.page_width_mm - snip_w_mm) / 2)
         if y_mm is None:
             y_mm = max(0.0, (self.project.page_height_mm - snip_h_mm) / 2)
-        snip = Snip(pixmap=pixmap, x_mm=x_mm, y_mm=y_mm, outline_path=outline_path)
+
+        self._push_undo()
+
+        # Center stays fixed throughout animation
+        self._anim_cx = x_mm + snip_w_mm / 2
+        self._anim_cy = y_mm + snip_h_mm / 2
+
+        s = self._ANIM_SCALE_START
+        snip = Snip(
+            pixmap=pixmap, outline_path=outline_path,
+            x_mm=self._anim_cx - snip_w_mm * s / 2,
+            y_mm=self._anim_cy - snip_h_mm * s / 2,
+            scale_x=s, scale_y=s,
+        )
         self.project.snips.append(snip)
         self._selected_snip = snip
+        self._anim_snip = snip
+        self._anim_step = 0
+        self._anim_timer.start(self._ANIM_INTERVAL_MS)
         self.update()
+
+    def _anim_tick(self):
+        self._anim_step += 1
+        t = self._anim_step / self._ANIM_STEPS
+        # Quarter-sine ease-out: fast start, decelerates smoothly into 1.0
+        ease = math.sin(math.pi / 2 * t)
+        scale = self._ANIM_SCALE_START + (1.0 - self._ANIM_SCALE_START) * ease
+        snip = self._anim_snip
+        if snip is not None:
+            mm_per_px = 25.4 / SCREEN_DPI
+            w_mm = snip.pixmap.width() * mm_per_px
+            h_mm = snip.pixmap.height() * mm_per_px
+            snip.scale_x = scale
+            snip.scale_y = scale
+            snip.x_mm = self._anim_cx - w_mm * scale / 2
+            snip.y_mm = self._anim_cy - h_mm * scale / 2
+            self.update()
+        if self._anim_step >= self._ANIM_STEPS:
+            self._anim_timer.stop()
+            if snip is not None:
+                mm_per_px = 25.4 / SCREEN_DPI
+                snip.scale_x = 1.0
+                snip.scale_y = 1.0
+                snip.x_mm = self._anim_cx - snip.pixmap.width() * mm_per_px / 2
+                snip.y_mm = self._anim_cy - snip.pixmap.height() * mm_per_px / 2
+            self._anim_snip = None
+            self.update()
 
     # --- painting ---
 
@@ -309,34 +419,55 @@ class WorkplaneCanvas(QWidget):
     def _draw_snip(self, painter: QPainter, snip: Snip):
         sr = self._snip_rect(snip)
 
+        # Non-stuck snips are drawn slightly enlarged with a small shadow to
+        # show they're still in the organizing layer.
+        if not snip.stuck:
+            dw = sr.width() * _LIFT
+            dh = sr.height() * _LIFT
+            vr = QRectF(sr.x() - dw / 2, sr.y() - dh / 2,
+                        sr.width() + dw, sr.height() + dh)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, _SHADOW_ALPHA))
+            effective_norm = self._effective_outline(snip)
+            if snip.outline_path is not None or snip.clip_path is not None:
+                t = QTransform()
+                t.translate(vr.x() + _SHADOW_OFF, vr.y() + _SHADOW_OFF)
+                t.scale(vr.width(), vr.height())
+                painter.drawPath(t.map(effective_norm))
+            else:
+                painter.drawRect(QRectF(vr.x() + _SHADOW_OFF, vr.y() + _SHADOW_OFF,
+                                        vr.width(), vr.height()))
+        else:
+            vr = sr
+
         painter.save()
-        painter.translate(sr.x(), sr.y())
+        painter.translate(vr.x(), vr.y())
 
         if snip.clip_path is not None:
-            t = QTransform().scale(sr.width(), sr.height())
+            t = QTransform().scale(vr.width(), vr.height())
             painter.setClipPath(t.map(snip.clip_path), Qt.ClipOperation.IntersectClip)
 
         if snip.flipped_h:
             painter.scale(-1, 1)
-            painter.translate(-sr.width(), 0)
+            painter.translate(-vr.width(), 0)
         if snip.flipped_v:
             painter.scale(1, -1)
-            painter.translate(0, -sr.height())
+            painter.translate(0, -vr.height())
         if snip.rotation:
-            cx, cy = sr.width() / 2, sr.height() / 2
+            cx, cy = vr.width() / 2, vr.height() / 2
             painter.translate(cx, cy)
             painter.rotate(snip.rotation)
             painter.translate(-cx, -cy)
 
         painter.drawPixmap(
-            QRectF(0, 0, sr.width(), sr.height()),
+            QRectF(0, 0, vr.width(), vr.height()),
             snip.pixmap,
             QRectF(snip.pixmap.rect()),
         )
         painter.restore()
 
         if snip is self._selected_snip:
-            # Stroke the actual visible shape, not the bounding box
             if snip.outline_path is not None:
                 base = snip.outline_path
             else:
@@ -347,8 +478,8 @@ class WorkplaneCanvas(QWidget):
                 else base.intersected(snip.clip_path)
             )
             t = QTransform()
-            t.translate(sr.x(), sr.y())
-            t.scale(sr.width(), sr.height())
+            t.translate(vr.x(), vr.y())
+            t.scale(vr.width(), vr.height())
             painter.setPen(QPen(QColor(80, 160, 255), 2, Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(t.map(effective))
@@ -423,6 +554,17 @@ class WorkplaneCanvas(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
 
+        if event.button() == Qt.MouseButton.RightButton:
+            if self.active_tool in ("auto", "move"):
+                snip = self._snip_at(event.position())
+                if snip:
+                    self._push_undo()
+                    snip.stuck = True
+                    self._selected_snip = None
+                    self._drag_snip = None
+                    self.update()
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             if self.active_tool == "trim":
                 snap = self._snap_to_snip_edge(event.position())
@@ -440,6 +582,7 @@ class WorkplaneCanvas(QWidget):
             if self.active_tool in ("auto", "move"):
                 snip = self._snip_at(event.position())
                 if snip:
+                    self._push_undo()
                     self._drag_snip = snip
                     self._selected_snip = snip
                     pos_mm = self._widget_to_page_mm(event.position())
@@ -505,6 +648,7 @@ class WorkplaneCanvas(QWidget):
                         and self._trim_end is not None
                         and self._trim_start_seg != self._trim_end_seg
                         and self._trim_verts):
+                    self._push_undo()
                     self._apply_trim(
                         self._trim_snip,
                         self._trim_start, self._trim_start_seg,
@@ -547,6 +691,21 @@ class WorkplaneCanvas(QWidget):
         else:
             super().wheelEvent(event)
 
+    def keyPressEvent(self, event):
+        ctrl = event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        if ctrl and event.key() == Qt.Key.Key_Z:
+            self._undo()
+            return
+        if ctrl and event.key() == Qt.Key.Key_Y:
+            self._redo()
+            return
+        if event.key() == Qt.Key.Key_Delete and self._selected_snip is not None:
+            self._push_undo()
+            self.project.snips.remove(self._selected_snip)
+            self._selected_snip = None
+            self._drag_snip = None
+            self.update()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._fit_pending:
@@ -573,6 +732,12 @@ class WorkplanePanel(QWidget):
         self.canvas.project = project
         self.canvas._fit_pending = True
         self.canvas.fit_to_window()
+
+    def undo(self):
+        self.canvas._undo()
+
+    def redo(self):
+        self.canvas._redo()
 
     def set_page_tool(self, tool: str):
         self.canvas.active_tool = tool

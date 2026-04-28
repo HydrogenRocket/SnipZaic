@@ -14,6 +14,7 @@ class Snip:
     flipped_v: bool = False
     blend_mode: str = "normal"
     locked: bool = False
+    stuck: bool = False         # permanently fixed to page; not selectable or editable
     # Normalized (0..1) trim clip — set by the trim tool, applied at render time.
     clip_path: QPainterPath | None = None
     # Normalized (0..1) original selection outline — set for poly/freehand snips.
